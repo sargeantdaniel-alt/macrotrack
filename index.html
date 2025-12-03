@@ -12,7 +12,7 @@
     <link rel="manifest" href="data:application/json,{&quot;name&quot;:&quot;MacroTrack&quot;,&quot;short_name&quot;:&quot;MacroTrack&quot;,&quot;description&quot;:&quot;Track your nutrition&quot;,&quot;start_url&quot;:&quot;.&quot;,&quot;display&quot;:&quot;standalone&quot;,&quot;background_color&quot;:&quot;#0a0a0a&quot;,&quot;theme_color&quot;:&quot;#0a0a0a&quot;}">
     <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect fill='%2316a34a' width='180' height='180' rx='40'/><text x='90' y='115' font-size='80' text-anchor='middle' fill='white'>🥗</text></svg>">
     
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/quagga/0.12.1/quagga.min.js"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
     
     <style>
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Mono:wght@700&display=swap');
@@ -425,7 +425,6 @@
         
         #scanner-container {
             width: 100%;
-            aspect-ratio: 4/3;
             background: #000;
             border-radius: 12px;
             overflow: hidden;
@@ -433,41 +432,20 @@
             margin-bottom: 16px;
         }
         
-        #scanner-container video {
+        #reader {
             width: 100%;
-            height: 100%;
-            object-fit: cover;
         }
         
-        .scanner-overlay {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            pointer-events: none;
+        #reader video {
+            border-radius: 12px;
         }
         
-        .scanner-frame {
-            width: 70%;
-            aspect-ratio: 3/1;
-            border: 2px solid var(--accent-green);
-            border-radius: 8px;
-            box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.5);
+        #reader__scan_region {
+            background: transparent !important;
         }
         
-        .scanner-line {
-            position: absolute;
-            width: 70%;
-            height: 2px;
-            background: var(--accent-green);
-            box-shadow: 0 0 10px var(--accent-green);
-            animation: scanLine 2s ease-in-out infinite;
-        }
-        
-        @keyframes scanLine {
-            0%, 100% { transform: translateY(-30px); opacity: 0.5; }
-            50% { transform: translateY(30px); opacity: 1; }
+        #reader__dashboard {
+            display: none !important;
         }
         
         .scanner-status {
@@ -1184,12 +1162,10 @@
             </div>
             <div class="modal-body">
                 <div id="scanner-container">
-                    <div class="scanner-overlay">
-                        <div class="scanner-frame"></div>
-                        <div class="scanner-line"></div>
-                    </div>
+                    <div id="reader"></div>
                 </div>
-                <p class="scanner-status" id="scannerStatus">Initializing camera...</p>
+                <p class="scanner-status" id="scannerStatus">Tap Start to begin scanning...</p>
+                <button class="btn btn-primary" id="startScanBtn" style="width: 100%; margin-top: 12px;">Start Scanner</button>
             </div>
         </div>
     </div>
@@ -1644,98 +1620,126 @@
         function closeModal(id) {
             document.getElementById(id).classList.remove('active');
             document.body.style.overflow = '';
-            if (id === 'scanModal') stopScanner();
+            if (id === 'scanModal') {
+                stopScanner();
+                document.getElementById('startScanBtn').textContent = 'Start Scanner';
+            }
         }
         
-        // ===== SCANNER =====
-        let scannerActive = false;
+        // ===== SCANNER (html5-qrcode) =====
+        let html5QrCode = null;
+        let scannerRunning = false;
         
-        function startScanner() {
+        async function startScanner() {
             const status = document.getElementById('scannerStatus');
-            status.textContent = 'Initializing camera...';
+            const startBtn = document.getElementById('startScanBtn');
             
-            if (typeof Quagga === 'undefined') {
-                status.textContent = 'Scanner not available. Use search instead.';
+            if (scannerRunning) {
+                stopScanner();
                 return;
             }
             
-            Quagga.init({
-                inputStream: { name: "Live", type: "LiveStream", target: document.querySelector('#scanner-container'), constraints: { facingMode: "environment" } },
-                decoder: { readers: ["ean_reader", "ean_8_reader", "upc_reader"] },
-                locate: true
-            }, err => {
-                if (err) { status.textContent = 'Camera access denied. Use search instead.'; return; }
-                Quagga.start();
-                scannerActive = true;
-                status.textContent = 'Point camera at barcode...';
-            });
+            status.textContent = 'Starting camera...';
+            startBtn.textContent = 'Stop Scanner';
             
-            Quagga.onDetected(async result => {
-                if (result?.codeResult?.code) {
-                    const barcode = result.codeResult.code;
-                    status.textContent = `Found: ${barcode}. Looking up...`;
-                    stopScanner();
-                    
-                    try {
-                        const resp = await fetch(`https://world.openfoodfacts.org/api/v0/product/${barcode}.json`);
-                        const data = await resp.json();
-                        
-                        console.log('Barcode lookup result:', data);
-                        
-                        if (data.status === 1 && data.product) {
-                            const p = data.product;
-                            const n = p.nutriments || {};
-                            
-                            // Get product name with fallbacks
-                            let productName = p.product_name || p.product_name_en || p.generic_name || 'Scanned Product';
-                            if (p.brands && !productName.includes(p.brands)) {
-                                productName += ` (${p.brands})`;
-                            }
-                            
-                            const food = {
-                                name: productName,
-                                brand: p.brands || '',
-                                per100g: {
-                                    calories: n['energy-kcal_100g'] || n['energy-kcal'] || (n['energy_100g'] ? n['energy_100g'] / 4.184 : 0),
-                                    protein: n.proteins_100g || n.proteins || 0,
-                                    carbs: n.carbohydrates_100g || n.carbohydrates || 0,
-                                    fat: n.fat_100g || n.fat || 0,
-                                    fibre: n.fiber_100g || n.fibre_100g || 0,
-                                    sugar: n.sugars_100g || n.sugars || 0,
-                                    saturated: n['saturated-fat_100g'] || n['saturated-fat'] || 0,
-                                    sodium: (n.sodium_100g || n.sodium || 0) * 1000,
-                                    potassium: (n.potassium_100g || 0) * 1000,
-                                    cholesterol: (n.cholesterol_100g || 0) * 1000,
-                                    calcium: (n.calcium_100g || 0) * 1000,
-                                    iron: (n.iron_100g || 0) * 1000,
-                                    vitaminD: n['vitamin-d_100g'] || 0,
-                                    magnesium: (n.magnesium_100g || 0) * 1000
-                                }
-                            };
-                            
-                            closeModal('scanModal');
-                            openQuantityModal(food);
-                        } else {
-                            // Product not in database - offer to search or add manually
-                            status.innerHTML = `Barcode ${barcode} not in database.<br><br>
-                                <button onclick="closeModal('scanModal'); openModal('addModal'); document.getElementById('foodSearch').value='${barcode}'; document.querySelector('[data-addtab=manual]').click();" 
-                                style="padding: 10px 20px; background: var(--accent-green); border: none; border-radius: 8px; color: white; font-size: 14px; cursor: pointer;">
-                                Add Manually
-                                </button>`;
-                        }
-                    } catch (e) {
-                        console.error('Barcode lookup error:', e);
-                        status.textContent = `Lookup failed: ${e.message}. Try again.`;
-                        setTimeout(startScanner, 3000);
+            try {
+                html5QrCode = new Html5Qrcode("reader");
+                
+                await html5QrCode.start(
+                    { facingMode: "environment" },
+                    {
+                        fps: 10,
+                        qrbox: { width: 250, height: 100 },
+                        aspectRatio: 1.333
+                    },
+                    async (decodedText) => {
+                        // Barcode detected
+                        status.textContent = `Found: ${decodedText}. Looking up...`;
+                        stopScanner();
+                        await lookupBarcode(decodedText);
+                    },
+                    (errorMessage) => {
+                        // Scan error - ignore, keep scanning
                     }
-                }
-            });
+                );
+                
+                scannerRunning = true;
+                status.textContent = 'Point at any barcode (any orientation)...';
+                
+            } catch (err) {
+                console.error('Scanner error:', err);
+                status.textContent = 'Camera access denied. Check permissions.';
+                startBtn.textContent = 'Start Scanner';
+            }
         }
         
         function stopScanner() {
-            if (scannerActive && typeof Quagga !== 'undefined') {
-                Quagga.stop();
-                scannerActive = false;
+            const startBtn = document.getElementById('startScanBtn');
+            startBtn.textContent = 'Start Scanner';
+            
+            if (html5QrCode && scannerRunning) {
+                html5QrCode.stop().then(() => {
+                    scannerRunning = false;
+                }).catch(err => console.error('Stop error:', err));
+            }
+            scannerRunning = false;
+        }
+        
+        async function lookupBarcode(barcode) {
+            const status = document.getElementById('scannerStatus');
+            
+            try {
+                const resp = await fetch(`https://world.openfoodfacts.org/api/v0/product/${barcode}.json`);
+                const data = await resp.json();
+                
+                console.log('Barcode lookup result:', data);
+                
+                if (data.status === 1 && data.product) {
+                    const p = data.product;
+                    const n = p.nutriments || {};
+                    
+                    let productName = p.product_name || p.product_name_en || p.generic_name || 'Scanned Product';
+                    if (p.brands && !productName.includes(p.brands)) {
+                        productName += ` (${p.brands})`;
+                    }
+                    
+                    const food = {
+                        name: productName,
+                        brand: p.brands || '',
+                        per100g: {
+                            calories: n['energy-kcal_100g'] || n['energy-kcal'] || (n['energy_100g'] ? n['energy_100g'] / 4.184 : 0),
+                            protein: n.proteins_100g || n.proteins || 0,
+                            carbs: n.carbohydrates_100g || n.carbohydrates || 0,
+                            fat: n.fat_100g || n.fat || 0,
+                            fibre: n.fiber_100g || n.fibre_100g || 0,
+                            sugar: n.sugars_100g || n.sugars || 0,
+                            saturated: n['saturated-fat_100g'] || n['saturated-fat'] || 0,
+                            sodium: (n.sodium_100g || n.sodium || 0) * 1000,
+                            potassium: (n.potassium_100g || 0) * 1000,
+                            cholesterol: (n.cholesterol_100g || 0) * 1000,
+                            calcium: (n.calcium_100g || 0) * 1000,
+                            iron: (n.iron_100g || 0) * 1000,
+                            vitaminD: n['vitamin-d_100g'] || 0,
+                            magnesium: (n.magnesium_100g || 0) * 1000
+                        }
+                    };
+                    
+                    closeModal('scanModal');
+                    openQuantityModal(food);
+                } else {
+                    status.innerHTML = `Barcode ${barcode} not found.<br><br>
+                        <button onclick="closeModal('scanModal'); openModal('addModal'); document.querySelector('[data-addtab=manual]').click();" 
+                        style="padding: 10px 20px; background: var(--accent-green); border: none; border-radius: 8px; color: white; font-size: 14px; cursor: pointer;">
+                        Add Manually
+                        </button>
+                        <button onclick="startScanner();" 
+                        style="padding: 10px 20px; background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 8px; color: white; font-size: 14px; cursor: pointer; margin-left: 8px;">
+                        Try Again
+                        </button>`;
+                }
+            } catch (e) {
+                console.error('Barcode lookup error:', e);
+                status.textContent = `Lookup failed: ${e.message}`;
             }
         }
         
@@ -1775,7 +1779,12 @@
             });
             
             // Modal buttons
-            document.getElementById('scanBtn').addEventListener('click', () => { openModal('scanModal'); setTimeout(startScanner, 300); });
+            document.getElementById('scanBtn').addEventListener('click', () => { 
+                openModal('scanModal'); 
+                document.getElementById('scannerStatus').textContent = 'Tap Start to begin scanning...';
+                document.getElementById('startScanBtn').textContent = 'Start Scanner';
+            });
+            document.getElementById('startScanBtn').addEventListener('click', startScanner);
             document.getElementById('addBtn').addEventListener('click', () => { openModal('addModal'); document.getElementById('searchResults').innerHTML = '<div class="search-status">Type a food name and tap search</div>'; });
             document.getElementById('closeScan').addEventListener('click', () => closeModal('scanModal'));
             document.getElementById('closeAdd').addEventListener('click', () => closeModal('addModal'));
